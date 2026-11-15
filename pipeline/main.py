@@ -15,7 +15,8 @@ from infer import infer
 from utils.data import load_volume
 from utils.dataset.split import split_inside
 from Log import new_run, add_step, add_epoch, combile
-from Analysis import analyse_epoch_loss, plot_step_loss, plot_all_fold
+from Analysis import analyse_epoch_loss, plot_step_loss, plot_all_fold, plot_eval_results, plot_guess_slice, plot_verify_slice
+from evaluate import evaluate_model, linear_interp
 
 
 def _fold_runs(prefix, cfg):
@@ -36,6 +37,32 @@ def _pick_epoch(prefix, cfg, default):
     merged = json.load(open(p)).get("epoch", {})
     avg = {int(ep): v["loss"] for ep, v in merged.items() if "loss" in v}
     return min(avg, key=avg.get) if avg else default
+
+
+def val_plot(model, val_ids, epoch, save_dir):
+    """对验证集第一个卷推理，画三组逐像素红绿对比图，存 analysis/{epoch}/{sid}.png。"""
+    sid = val_ids[0]
+    hr, lr = load_volume(sid)
+    sr = infer(model, lr, device=configs.DEVICE, sample_steps=configs.SAMPLE_STEPS)
+    base = linear_interp(lr, model.scale)
+    out = save_dir / "analysis" / f"{epoch:02d}"
+    out.mkdir(parents=True, exist_ok=True)
+    plot_verify_slice(hr, sr, base, out / f"{sid}.png")
+
+
+def _load_reg_net(model):
+    """加载第 1 步训练好的配准权重。Diffusion 冻结 reg_net；ResidualInterp 已在 build 里加载且需端到端微调。"""
+    import torch
+    if hasattr(model, "net"):
+        return   # ResidualInterp：build 里已加载 reg_net.pt，保持端到端微调
+    reg_path = configs.PARAMETER_DIR / "reg_net.pt"
+    if reg_path.exists():
+        model.reg_net.load_state_dict(torch.load(reg_path, map_location=configs.DEVICE))
+        for p in model.reg_net.parameters():
+            p.requires_grad_(False)
+        print(f"加载配准权重并冻结 {reg_path}")
+    else:
+        print("⚠️ 无 reg_net.pt，配准随机初始化（请先 python reg_train.py）")
 
 
 def main():
@@ -68,24 +95,29 @@ def main():
                           train_ids=all_train, test_ids=test_ids)
         print(f"[final] {run_dir.name}  best_epoch={best_epoch}  train={len(all_train)}  test={len(test_ids)}")
         model = build_model(configs.MODEL, y_hr, y_lr).to(configs.DEVICE)
+        _load_reg_net(model)
         train(model, all_train, [], best_epoch, configs.LR,
               configs.SCHEDULER_STEP, configs.SCHEDULER_TIMES, patience,
-              log=lambda s, r: add_step(run_dir, "train", "loss.json", s, r))
-        test_loss = evaluate(model, test_ids)
-        add_epoch(run_dir, "val", "loss.json", 1, {"loss": test_loss})
-        print(f"[final] test_loss={test_loss:.6f}（{len(test_ids)} 卷）")
-        # 推理演示（测试集第 1 卷前 3 帧，避免 T=1000 全卷太慢）
-        _, test_lr = load_volume(test_ids[0])
-        sr = infer(model, test_lr[:3], configs.DEVICE)
-        print(f"[infer] {test_lr[:3].shape} -> {sr.shape}")
+              log=lambda s, r: add_step(run_dir, "train", "loss.json", s, r), save_dir=run_dir)
+        per_volume, mean_dl, mean_base = evaluate_model(model, test_ids, configs.DEVICE,
+                                                        sample_steps=20, guess_dir=run_dir / "guess")
+        json.dump({"run": run_dir.name, "per_volume": per_volume,
+                   "mean_dl": mean_dl, "mean_base": mean_base},
+                  open(run_dir / "val" / "results.json", "w"), indent=2)
+        add_epoch(run_dir, "val", "loss.json", 1, {"loss": mean_dl["l1"]})
+        print(f"[final] dl l1={mean_dl['l1']:.6f} psnr={mean_dl['psnr']:.3f} | base l1={mean_base['l1']:.6f}")
+        plot_eval_results(run_dir)
+        plot_guess_slice(run_dir, test_ids[0])
     else:
         run_dir = new_run(args.prefix, configs.MODEL, args.cfg, configs.SCALE, args.fold,
                           train_ids=train_ids, val_ids=val_ids, test_ids=test_ids)
         print(f"[train] {run_dir.name}  train={len(train_ids)} val={len(val_ids)} test={len(test_ids)}")
         model = build_model(configs.MODEL, y_hr, y_lr).to(configs.DEVICE)
+        _load_reg_net(model)
         history = train(model, train_ids, val_ids, epochs, configs.LR,
                         configs.SCHEDULER_STEP, configs.SCHEDULER_TIMES, patience,
-                        log=lambda s, r: add_step(run_dir, "train", "loss.json", s, r))
+                        log=lambda s, r: add_step(run_dir, "train", "loss.json", s, r),
+                        save_dir=run_dir, val_plot=val_plot)
         for ep, v in history.items():
             add_epoch(run_dir, "train", "loss.json", ep, {"loss": v["train_loss"]})
             add_epoch(run_dir, "val", "loss.json", ep, {"loss": v["val_loss"]})

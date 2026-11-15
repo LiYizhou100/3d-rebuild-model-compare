@@ -2,8 +2,8 @@
 import torch
 
 
-def infer(model, lr, device="cpu"):
-    """lr numpy -> sr numpy。model 需实现 infer(lr_sr, device)。"""
+def infer(model, lr, device="cpu", **kwargs):
+    """lr numpy -> sr numpy。model 需实现 infer(lr_sr, device, **kwargs)。"""
     model.eval()
     with torch.no_grad():
-        return model.infer(lr, device=device)
+        return model.infer(lr, device=device, **kwargs)
