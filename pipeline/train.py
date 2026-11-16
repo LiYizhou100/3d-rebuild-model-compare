@@ -8,7 +8,8 @@ def train(model, train_ids, val_ids, epochs, lr, step_size, gamma, patience, log
     """通用训练循环 + 早停。
 
     model 需实现：make_batches(hr,lr) / train_step(batch,opt,sch) / eval_loss(hr,lr)。
-    patience：连续多少次 val loss 不下降就早停（超参）。
+    patience：连续多少次「既没创新低、也没比上一 epoch 下降」就早停（超参）。
+              ★ 下降但未创新低 → 不累计（仍在进步，不停）。
     save_dir：给定时，best 时存 best.pt，结束时存 last.pt。
     val_plot：可选回调 val_plot(model, val_ids, epoch, save_dir)，每 epoch 验证后画图。
     返回 history = {epoch: {"train_loss":.., "val_loss":..}}。
@@ -16,6 +17,7 @@ def train(model, train_ids, val_ids, epochs, lr, step_size, gamma, patience, log
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     sch = torch.optim.lr_scheduler.StepLR(opt, step_size, gamma)
     best_val = float("inf")
+    prev_val = float("inf")
     no_improve = 0
     history = {}
     step = 0
@@ -39,15 +41,21 @@ def train(model, train_ids, val_ids, epochs, lr, step_size, gamma, patience, log
             val_plot(model, val_ids, ep + 1, save_dir)
         if val_ids:
             if val_loss < best_val:
+                # 创新低 → 存 best，重置
                 best_val = val_loss
                 no_improve = 0
                 if save_dir:
                     torch.save(model.state_dict(), save_dir / "best.pt")
+            elif val_loss < prev_val:
+                # 没创新低，但比上一 epoch 下降 → 仍在进步，重置（不停）
+                no_improve = 0
             else:
+                # 既没创新低也没下降（停滞/上升）→ 累计
                 no_improve += 1
                 if no_improve >= patience:
                     print(f"早停：val loss 连续 {patience} 个 epoch 未下降（best={best_val:.6f}）")
                     break
+            prev_val = val_loss
     if save_dir:
         torch.save(model.state_dict(), save_dir / "last.pt")
     return history
