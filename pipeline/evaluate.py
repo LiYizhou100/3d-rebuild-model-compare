@@ -30,26 +30,35 @@ def linear_interp(lr, scale):
 
 
 def evaluate_model(model, ids, device, sample_steps=20, guess_dir=None):
-    """对 ids 卷推理 + 算 DL/baseline 重建指标。返回 (per_volume, mean_dl, mean_base)。"""
+    """对 ids 卷推理 + 算 DL/baseline(/reg 配准插值) 重建指标。
+    返回 (per_volume, mean_dl, mean_base, mean_reg)；模型无 infer_reg 时 mean_reg=None。"""
     per_volume = []
     for sid in ids:
         hr, lr = load_volume(sid)
         sr = infer(model, lr, device=device, sample_steps=sample_steps)
         base = linear_interp(lr, model.scale)
+        reg = None
+        if hasattr(model, "infer_reg"):
+            reg = model.infer_reg(lr, device=device)
         m_dl = compute_all(sr, hr)
         m_base = compute_all(base, hr)
-        per_volume.append({"id": sid, "dl": m_dl, "base": m_base})
+        m_reg = compute_all(reg, hr) if reg is not None else None
+        per_volume.append({"id": sid, "dl": m_dl, "base": m_base, "reg": m_reg})
         if guess_dir:
             np.savez_compressed(guess_dir / f"{sid}.npz",
                                 sr=sr.astype(np.float32),
                                 base=base.astype(np.float32),
-                                hr=hr.astype(np.float32))
-        print(f"{sid}: dl l1={m_dl['l1']:.6f} base l1={m_base['l1']:.6f}"
+                                hr=hr.astype(np.float32),
+                                **({"reg": reg.astype(np.float32)} if reg is not None else {}))
+        reg_str = f" reg l1={m_reg['l1']:.6f}" if m_reg else ""
+        print(f"{sid}: dl l1={m_dl['l1']:.6f} base l1={m_base['l1']:.6f}{reg_str}"
               f"  psnr={m_dl['psnr']:.2f}/{m_base['psnr']:.2f}")
     keys = ["l1", "psnr", "ssim"]
     mean_dl = {k: float(np.mean([r["dl"][k] for r in per_volume])) for k in keys}
     mean_base = {k: float(np.mean([r["base"][k] for r in per_volume])) for k in keys}
-    return per_volume, mean_dl, mean_base
+    mean_reg = ({k: float(np.mean([r["reg"][k] for r in per_volume])) for k in keys}
+                if all(r["reg"] for r in per_volume) else None)
+    return per_volume, mean_dl, mean_base, mean_reg
 
 
 def main():
@@ -81,13 +90,15 @@ def main():
 
     guess_dir = run_dir / "guess"
     guess_dir.mkdir(parents=True, exist_ok=True)
-    per_volume, mean_dl, mean_base = evaluate_model(
+    per_volume, mean_dl, mean_base, mean_reg = evaluate_model(
         model, ids, configs.DEVICE, sample_steps=args.sample_steps, guess_dir=guess_dir)
     json.dump({"run": args.run, "per_volume": per_volume,
-               "mean_dl": mean_dl, "mean_base": mean_base},
+               "mean_dl": mean_dl, "mean_base": mean_base, "mean_reg": mean_reg},
               open(run_dir / "val" / "results.json", "w"), indent=2)
     print(f"mean_dl:   {mean_dl}")
     print(f"mean_base: {mean_base}")
+    if mean_reg:
+        print(f"mean_reg:  {mean_reg}")
     print(f"已存 {run_dir / 'val' / 'results.json'} 和 guess/")
 
 
