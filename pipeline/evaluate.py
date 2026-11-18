@@ -72,6 +72,13 @@ def main():
 
     run_dir = configs.PARAMETER_DIR / args.run
     cfg = json.load(open(run_dir / "config.json"))["config"]
+    # ★ 恢复训练时的关键配置（scale + 输入开关），否则用当前 config.yaml 会口径错乱
+    restore = {}
+    if "scale" in cfg:
+        restore["scale"] = cfg["scale"]
+    restore.update(cfg.get("input_switches", {}))
+    if restore:
+        configs.apply_cli([f"{k}={v}" for k, v in restore.items()])
 
     # 测试集（有最终测试集则用它，否则用 val）
     train_ids, val_ids, test_ids = split_inside(args.mode, args.fold)

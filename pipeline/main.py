@@ -123,6 +123,18 @@ def main():
         for ep, v in history.items():
             add_epoch(run_dir, "train", "loss.json", ep, {"loss": v["train_loss"]})
             add_epoch(run_dir, "val", "loss.json", ep, {"loss": v["val_loss"]})
+        # ★ 训练结束自动评估验证集（加载 best.pt），生成 results.json，供 compare 直接读
+        best = run_dir / "best.pt"
+        if best.exists() and val_ids:
+            model.load_state_dict(torch.load(best, map_location=configs.DEVICE))
+            (run_dir / "guess").mkdir(parents=True, exist_ok=True)
+            per_volume, mean_dl, mean_base, mean_reg = evaluate_model(
+                model, val_ids, configs.DEVICE, sample_steps=configs.SAMPLE_STEPS,
+                guess_dir=run_dir / "guess")
+            json.dump({"run": run_dir.name, "per_volume": per_volume,
+                       "mean_dl": mean_dl, "mean_base": mean_base, "mean_reg": mean_reg},
+                      open(run_dir / "val" / "results.json", "w"), indent=2)
+            print(f"[auto-eval] dl l1={mean_dl['l1']:.6f} base l1={mean_base['l1']:.6f}")
         plot_step_loss(run_dir)
         analyse_epoch_loss(run_dir)
         print(f"完成 {run_dir.name}")
